@@ -1,0 +1,46 @@
+# Config file for Bomberman Hero Recompilation
+
+[input]
+entrypoint = 0x80000400
+# Paths are relative to the location of this config file.
+rom_file_path = "bmhero.z64"
+bss_section_suffix = "_bss"
+symbols_file_path = "BMHeroSyms/dump.toml"
+output_func_path = "RecompiledFuncs"
+trace_mode = false
+
+[patches]
+stubs = [
+    #"__osSiDeviceBusy",
+]
+
+ignored = [
+    #"__osBlockSum",
+    "__osPfsReleasePages",
+    "__osPfsDeclearPage",
+    #"osPfsReFormat",
+]
+
+# When osAiGetLength returns a number that exceeds the target amount of samples per frame, the calculation (target samples per frame - osAiGetLength()) will result in a negative number.
+# When the clamping takes place to prevent a number of bytes that is too small, it doesn't take into account the negative number that resulted from the calculation.
+# Not doing this results in a negative number being given to osAiSetNextBuffer causing a massive memory leak and crash (because a signed negative number is being read as unsigned).
+[[patches.instruction]]
+func = "__amHandleFrameMsg"
+vram = 0x8000DB1C
+value = 0x0328082A # sltu       $at, $t9, $t0 -> slt        $at, $t9, $t0
+
+# fix boot logo color fill. The wrong fill is used
+[[patches.instruction]]
+func = "func_80330190_unk_bin_5"
+vram = 0x803301A4
+value = 0x24050000 # addiu      $a1, $zero, 0xFF -> addiu      $a1, $zero, 0x00
+
+[[patches.instruction]]
+func = "func_80330190_unk_bin_5"
+vram = 0x803301A8
+value = 0x24060000 # addiu      $a2, $zero, 0xFF -> addiu      $a2, $zero, 0x00
+
+[[patches.instruction]]
+func = "func_80330190_unk_bin_5"
+vram = 0x803301B0
+value = 0x24070000 # addiu      $a3, $zero, 0xFF -> addiu      $a3, $zero, 0x00
