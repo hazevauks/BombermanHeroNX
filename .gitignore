@@ -1,83 +1,59 @@
-# VSCode file settings
-.vscode/settings.json
-# .vscode/c_cpp_properties.json
-.vscode/launch.json
-
-# Input elf and rom files
-*.elf
+# The game is yours to supply: no ROM, and nothing made from one, belongs in the repository.
 *.z64
+*.n64
+*.v64
+/RecompiledFuncs/
+/RecompiledPatches/
+/rsp/
+/patches/*.bin
+/patches/*.elf
+/patches/*.map
+/patches/*.o
+/patches/*.d
+
+# The SD card layout holds your ROM once packaged, and the logs come from a console: only their READMEs
+# belong here.
+/SD_CARD/*
+!/SD_CARD/README.md
+/SD_LOG/*
+!/SD_LOG/README.md
+
+# Project notes kept outside the repository
+/*Documentation.txt
+
+# The Vulkan driver SDK is downloaded separately (docs/building.md)
+/third_party/nvk-sdk/
+
+# Other projects kept next to this one for reference
+/_ref/
+
+# Build output
+/build/
+/out/
+*.nro
+*.nacp
+*.elf
 *.map
-*.d
-
-patches/*.bin
-patches/*.elf
-patches/*.map
-
-# built RSP file
-rsp/
-
-# Output C files
-RecompiledFuncs/
-RecompiledPatches/
-
-# Linux build output
-build/
 *.o
-
-# Windows build output
+*.d
 *.exe
 *.dll
 *.lib
 *.pdb
 
-# Data dumps
+# Symbol dumps
 data_dump.toml
 dump.toml
 
-# Local backups
-backups
-
-# User-specific files
-*.rsuser
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-
-# Build results
-[Dd]ebug/
-[Dd]ebugPublic/
-[Rr]elease/
-[Rr]eleases/
-x64/
-x86/
-[Ww][Ii][Nn]32/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Bb]in/
-[Oo]bj/
-[Ll]og/
-[Ll]ogs/
-out/
-
-# Visual Studio 2015/2017 cache/options directory
-.vs/
-vcpkg_installed/
-
-# Runtime files
+# Runtime files of the PC version
 imgui.ini
 rt64.log
-
-node_modules/
-
-# Recompiler Linux binary
-N64Recomp
-RSPRecomp
-.DS_Store
-
-# Controller mappings file
 gamecontrollerdb.txt
 
-# RSP Microcode recompiled output
-aspMain.cpp
+# Host files
+.DS_Store
+Thumbs.db
+__pycache__/
+.vs/
+.vscode/
+.claude/
