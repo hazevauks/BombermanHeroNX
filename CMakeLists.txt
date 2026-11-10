@@ -12,6 +12,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Nintendo Switch: libraries, Vulkan driver and host tools (see switch/cmake and docs/building.md).
+if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    set(BMHERO_SWITCH TRUE)
+    include(${CMAKE_SOURCE_DIR}/switch/cmake/SwitchPlatform.cmake)
+endif()
+
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-everything /W4")
 endif()
@@ -103,6 +109,7 @@ target_sources(PatchesLib PRIVATE
 
 set_source_files_properties(${CMAKE_SOURCE_DIR}/RecompiledPatches/patches.c PROPERTIES COMPILE_FLAGS -fno-strict-aliasing)
 
+if (NOT BMHERO_SWITCH)
 # Build patches elf
 if(NOT DEFINED PATCHES_C_COMPILER)
     set(PATCHES_C_COMPILER clang)
@@ -118,11 +125,15 @@ add_custom_target(PatchesBin
     BYPRODUCTS ${CMAKE_SOURCE_DIR}/patches/patches.elf
 )
 
+endif() # NOT BMHERO_SWITCH
+
 # Generate patches_bin.c from patches.bin
 add_custom_command(OUTPUT ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches_bin.c
     COMMAND file_to_c ${CMAKE_SOURCE_DIR}/patches/patches.bin bk_patches_bin ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches_bin.c ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches_bin.h
     DEPENDS ${CMAKE_SOURCE_DIR}/patches/patches.bin
 )
+
+if (NOT BMHERO_SWITCH)
 
 # Recompile patches elf into patches.c and patches.bin
 add_custom_command(OUTPUT
@@ -135,6 +146,7 @@ add_custom_command(OUTPUT
                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                    DEPENDS ${CMAKE_SOURCE_DIR}/patches/patches.elf
 )
+endif() # NOT BMHERO_SWITCH
 
 # Main executable
 add_executable(BMHeroRecompiled)
@@ -312,6 +324,8 @@ set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-tar
 if (${WIN32})
     set (DXC "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc.exe")
     add_compile_definitions(NOMINMAX)
+elseif (CMAKE_HOST_WIN32 OR CMAKE_HOST_SYSTEM_NAME MATCHES "MSYS|MINGW|CYGWIN")
+    set (DXC "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc.exe")
 else()
     if (APPLE)
         # Apple's binary is universal, so it'll work on both x86_64 and arm64
@@ -368,5 +382,9 @@ endforeach()
 target_sources(BMHeroRecompiled PRIVATE ${GENERATED_NRM_SOURCES})
 
 target_sources(BMHeroRecompiled PRIVATE ${SOURCES})
+
+if (BMHERO_SWITCH)
+    include(${CMAKE_SOURCE_DIR}/switch/cmake/SwitchTarget.cmake)
+endif()
 
 set_property(TARGET BMHeroRecompiled PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

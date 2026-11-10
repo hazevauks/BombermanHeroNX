@@ -8,7 +8,9 @@
 #include <stdexcept>
 #include <cinttypes>
 
+#if !defined(__SWITCH__)
 #include "nfd.h"
+#endif
 
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
@@ -64,12 +66,21 @@
 
 #include "../../lib/rt64/src/contrib/stb/stb_image.h"
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#include "nx_platform.h"
+#include "audio_queue.h"
+#endif
+
 const std::string version_string = "0.7.3";
 
 template<typename... Ts>
 void exit_error(const char* str, Ts ...args) {
     // TODO pop up an error
     ((void)fprintf(stderr, str, args), ...);
+#if defined(__SWITCH__)
+    nx::log_flush();
+#endif
     assert(false);
         
     ultramodern::error_handling::quick_exit(__FILE__, __LINE__, __FUNCTION__);
@@ -158,6 +169,13 @@ bool SetImageAsIcon(const char* filename, SDL_Window* window)
 SDL_Window* window;
 
 ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
+#if defined(__SWITCH__)
+    // An SDL window on the Switch always comes with an OpenGL ES surface. RT64 presents through Vulkan, so the
+    // renderer gets libnx's window as an opaque handle and SDL is kept for input, events and audio only.
+    window = reinterpret_cast<SDL_Window*>(nwindowGetDefault());
+    nx::log("gfx: using the libnx window");
+    return ultramodern::renderer::WindowHandle{ window };
+#else
     uint32_t flags = SDL_WINDOW_RESIZABLE;
 
 #if defined(__APPLE__)
@@ -195,9 +213,17 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
 #else
     static_assert(false && "Unimplemented");
 #endif
+#endif // !__SWITCH__
 }
 
 void update_gfx(void*) {
+#if defined(__SWITCH__)
+    if (!nx::pump_applet()) {
+        SDL_Event quit{};
+        quit.type = SDL_QUIT;
+        SDL_PushEvent(&quit);
+    }
+#endif
     recompinput::handle_events();
 }
 
@@ -219,6 +245,11 @@ constexpr uint32_t duplicated_input_frames = 4;
 static uint32_t discarded_output_frames;
 
 constexpr uint32_t bytes_per_frame = input_channels * sizeof(float);
+
+#if defined(__SWITCH__)
+static nx::audio::QueueCorrector audio_corrector;
+static std::vector<float> corrected_audio;
+#endif
 
 void queue_samples(int16_t* audio_data, size_t sample_count) {
     // Buffer for holding the output of swapping the audio channels. This is reused across
@@ -268,6 +299,13 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
     uint32_t num_bytes_to_queue = audio_convert.len_cvt - output_channels * discarded_output_frames * sizeof(swap_buffer[0]);
     float* samples_to_queue = swap_buffer.data() + output_channels * discarded_output_frames / 2;
 
+#if defined(__SWITCH__)
+    // A late frame leaves a backlog in the queue. Play it back slightly faster instead of dropping samples.
+    cur_queued_microseconds = nx::audio::queued_microseconds(SDL_GetQueuedAudioSize(audio_device), output_sample_rate, output_channels);
+    audio_corrector.process(samples_to_queue, num_bytes_to_queue / (output_channels * sizeof(float)), cur_queued_microseconds, corrected_audio);
+    samples_to_queue = corrected_audio.data();
+    num_bytes_to_queue = uint32_t(corrected_audio.size() * sizeof(float));
+#else
     // Prevent audio latency from building up by skipping samples in incoming audio when too many samples are already queued.
     // Skip samples based on how many microseconds of samples are queued already.
     uint32_t skip_factor = cur_queued_microseconds / 100000;
@@ -279,6 +317,7 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
             samples_to_queue[2 * i + 1] = samples_to_queue[2 * skip_ratio * i + 1];
         }
     }
+#endif
 
     // Queue the swapped audio data.
     // Offset the data start by only half the discarded frame count as the other half of the discarded frames are at the end of the buffer.
@@ -347,6 +386,11 @@ bool reset_audio(uint32_t output_freq) {
     }
 
     SDL_PauseAudioDevice(audio_device, 0);
+
+#if defined(__SWITCH__)
+    audio_corrector.reset();
+    nx::log("audio: device opened with the '%s' driver at %u Hz", SDL_GetCurrentAudioDriver(), output_freq);
+#endif
 
     output_sample_rate = output_freq;
     update_audio_converter();
@@ -524,7 +568,7 @@ void release_preload(PreloadContext& context) {
     context = {};
 }
 
-#elif defined(__linux__) || defined(APPLE)
+#elif defined(__linux__) || defined(APPLE) || defined(__SWITCH__)
 
 struct PreloadContext {
 
@@ -609,6 +653,11 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
+#if defined(__SWITCH__)
+    if (!nx::startup(argc, argv)) {
+        return EXIT_FAILURE;
+    }
+#endif
     recomp::Version project_version{};
     if (!recomp::Version::from_string(version_string, project_version)) {
         ultramodern::error_handling::message_box(("Invalid version string: " + version_string).c_str());
@@ -676,8 +725,10 @@ int main(int argc, char** argv) {
     std::filesystem::current_path("/var/data", ec);
 #endif
 
+#if !defined(__SWITCH__)
     // Initialize native file dialogs.
     NFD_Init();
+#endif
 
     // Initialize program settings.
     recompui::programconfig::set_program_name(banjo::program_name);
@@ -807,7 +858,11 @@ int main(int argc, char** argv) {
         threads_callbacks
     );
 
+#if defined(__SWITCH__)
+    nx::shutdown();
+#else
     NFD_Quit();
+#endif
 
     if (preloaded) {
         release_preload(preload_context);
