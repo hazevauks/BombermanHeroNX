@@ -173,6 +173,71 @@ static void set_control_descriptions() {
     recompinput::set_game_input_description(recompinput::GameInput::DPAD_RIGHT, "Unused. Mods may use it for additional features.");
 }
 
+#if defined(__SWITCH__)
+// The Switch layout. Buttons follow their labels, as in Nintendo's own N64 releases on the console: A is the
+// N64's A and B its B, so the button names the game shows are the ones on the controller, and A confirms and B
+// goes back in every menu.
+//
+// The constants name positions, not labels: EAST is the right face button (A on a Switch controller), SOUTH the
+// bottom one (B), WEST the left one (Y) and NORTH the top one (X).
+static void set_switch_control_layout() {
+    using namespace recompinput;
+
+    set_default_mapping_for_controller(GameInput::A, { InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST) });
+    set_default_mapping_for_controller(GameInput::B, { InputField::controller_digital(SDL_CONTROLLER_BUTTON_SOUTH) });
+
+    // Setting a bomb is R on the N64. It gets the thumb button next to B, and ZR for the vehicle stages, where
+    // the thumb is busy holding A to accelerate or climb.
+    set_default_mapping_for_controller(GameInput::R, {
+        InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST),
+        InputField::controller_analog(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, true)
+    });
+    set_default_mapping_for_controller(GameInput::Z, {
+        InputField::controller_analog(SDL_CONTROLLER_AXIS_TRIGGERLEFT, true)
+    });
+
+    // The camera: the right stick as the C buttons, L and R to turn it, X to tilt it.
+    set_default_mapping_for_controller(GameInput::C_LEFT, {
+        InputField::controller_analog(SDL_CONTROLLER_AXIS_RIGHTX, false),
+        InputField::controller_digital(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
+    });
+    set_default_mapping_for_controller(GameInput::C_RIGHT, {
+        InputField::controller_analog(SDL_CONTROLLER_AXIS_RIGHTX, true),
+        InputField::controller_digital(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)
+    });
+    set_default_mapping_for_controller(GameInput::C_UP, {
+        InputField::controller_analog(SDL_CONTROLLER_AXIS_RIGHTY, false),
+        InputField::controller_digital(SDL_CONTROLLER_BUTTON_NORTH)
+    });
+    set_default_mapping_for_controller(GameInput::C_DOWN, {
+        InputField::controller_analog(SDL_CONTROLLER_AXIS_RIGHTY, true)
+    });
+    set_default_mapping_for_controller(GameInput::L, {
+        InputField::controller_digital(SDL_CONTROLLER_BUTTON_RIGHTSTICK)
+    });
+
+    // The port's own menus.
+    set_default_mapping_for_controller(GameInput::ACCEPT_MENU, { InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST) });
+    set_default_mapping_for_controller(GameInput::BACK_MENU, { InputField::controller_digital(SDL_CONTROLLER_BUTTON_SOUTH) });
+
+    const char *move = "Moves Bomberman, and steers the Bomber Jet, Marine, Copter and Slider.";
+    set_game_input_description(GameInput::Y_AXIS_POS, move);
+    set_game_input_description(GameInput::Y_AXIS_NEG, move);
+    set_game_input_description(GameInput::X_AXIS_NEG, move);
+    set_game_input_description(GameInput::X_AXIS_POS, move);
+    set_game_input_description(GameInput::A, "Jumps, and confirms in menus. In the vehicle stages it speeds up the Bomber Jet and makes the Bomber Copter climb.");
+    set_game_input_description(GameInput::B, "Throws a bomb. Hold it on the ground to keep throwing. Slows down the Bomber Jet.");
+    set_game_input_description(GameInput::R, "Sets a bomb at Bomberman's feet. Fires bombs in the vehicle stages.");
+    set_game_input_description(GameInput::Z, "Fires bombs in the vehicle stages.");
+    set_game_input_description(GameInput::L, "Unused. Mods may use it for additional features.");
+    set_game_input_description(GameInput::START, "Pauses the game and skips some cutscenes.");
+    set_game_input_description(GameInput::C_UP, "Tilts the camera while Bomberman stands still.");
+    set_game_input_description(GameInput::C_DOWN, "Sets a bomb, like R. Fires bombs in the vehicle stages.");
+    set_game_input_description(GameInput::C_LEFT, "Turns the camera to the left while Bomberman stands still.");
+    set_game_input_description(GameInput::C_RIGHT, "Turns the camera to the right while Bomberman stands still.");
+}
+#endif
+
 banjo::CutsceneAspectRatioMode banjo::get_cutscene_aspect_ratio_mode() {
     return get_graphics_config_enum_value<banjo::CutsceneAspectRatioMode>(banjo::configkeys::graphics::cutscene_aspect_ratio_mode);
 }
@@ -197,6 +262,9 @@ void banjo::init_config() {
 
     set_control_defaults();
     set_control_descriptions();
+#if defined(__SWITCH__)
+    set_switch_control_layout();
+#endif
     recompui::config::create_controls_tab();
 
     auto &sound_config = recompui::config::create_sound_tab();
