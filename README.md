@@ -20,9 +20,9 @@ Unofficial Nintendo Switch port of **Bomberman Hero** (1998), built on
 
 ---
 
-> [!WARNING]
-> Work in progress. It builds, but it has not been played on a console yet.
-> See [Status](#status).
+> [!NOTE]
+> First version. It starts and plays on a real Switch at 60 fps with the standard clocks, but it has only
+> been played for a short while. See [Status](#status) for what has and has not been checked.
 
 The game's own files are not included: the port runs on your copy of the game.
 
@@ -82,6 +82,12 @@ Everything lives in `sd:/switch/BombermanHeroNX/`:
 | `cache/` | compiled shaders, so that later starts are faster. Safe to delete |
 | `SD_LOG/` | logs |
 
+The first start compiles the game's shaders, so the first minute or two stutters. They are kept in `cache/`
+for the next time.
+
+While the port is young, the frame rate is shown in a corner of the screen. To hide it, create an empty file
+named `no-fps` in `config/`.
+
 ## Reporting a problem
 
 Open an issue with `bmhero_log.txt` from `sd:/switch/BombermanHeroNX/SD_LOG/`, and `bmhero_crash.txt` or
@@ -91,14 +97,14 @@ Open an issue with `bmhero_log.txt` from `sd:/switch/BombermanHeroNX/SD_LOG/`, a
 
 | Area | State |
 | --- | --- |
-| Game code generated from the ROM (4,864 functions) | Works |
-| Builds for the Switch (runtime, renderer, launcher, Vulkan driver) | Works |
-| Starts on a console | **Not tested yet** |
-| Menus, levels, vehicle stages, bosses, cutscenes | **Not tested yet** |
-| Sound, controls, rumble, saves | **Not tested yet** |
-| 60 fps at the standard clocks (1020 / 307 / 1331 MHz) | **Not measured yet** |
+| Starts and plays on a console | Works (Switch, Horizon 23.0.1, handheld) |
+| 60 fps at the standard clocks (1020 / 307 / 1331 MHz) | Works in handheld, once the shaders are compiled |
+| Docked | **Not tested yet** |
+| The whole game: every world, vehicle stage, boss and cutscene | **Not tested yet** |
+| Saves across restarts, sleep and wake, long sessions | **Not tested yet** |
+| Mods that change game code | Not supported yet; texture packs load |
 
-More detail, and what each test needs to show, is in [docs/status.md](docs/status.md).
+The numbers, and what each remaining test needs to show, are in [docs/status.md](docs/status.md).
 
 ## Building
 

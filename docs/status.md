@@ -1,6 +1,25 @@
 # Status
 
-Version 0.1.0. What has been checked, how, and what still needs a console.
+Version 0.1.0. What has been checked, how, and what still needs testing.
+
+## Tested on a console
+
+One session on 2026-11-10: a Switch on Horizon 23.0.1 with Atmosphère, handheld, at the standard clocks
+(CPU 1020 MHz, GPU 307.2 MHz, memory 1331.2 MHz), starting from an empty shader cache. The player's report:
+it started and ran perfectly. The log of that session (198 seconds) says:
+
+| | |
+| --- | --- |
+| Screen | 1280x720, vertical sync, three swapchain images |
+| Errors | none: no Vulkan error, GPU fault or lost device |
+| Memory given to the process | 3,189 MB |
+| First 85 seconds | 44 to 60 fps, with stalls of up to half a second while shaders were compiled |
+| The 110 seconds after that | 59.4 to 60.0 fps in every 5-second window; slowest frame 34 ms |
+| Game frames | 30 per second, as on the N64, with RT64 drawing the frame in between |
+| Display list stage, per game frame | 12.7 ms on average, of the 33.3 ms available |
+| Waiting for the GPU, per frame | 3.4 ms on average |
+
+So the target, 60 fps at the standard clocks, is met in handheld once the shaders are in the cache.
 
 ## Checked on the PC
 
@@ -9,48 +28,41 @@ Version 0.1.0. What has been checked, how, and what still needs a console.
 | The ROM | SHA-1 compared with the one Bomberman Hero: Recompiled supports |
 | Game code | N64Recomp turns the ROM into 4,864 C functions; RSPRecomp writes the audio microcode |
 | Game patches | the MIPS patches compile and link with clang and lld, and recompile into 553 functions |
-| Dependency patches | each applies to its pinned commit, and `tools/build.py deps` reports every repository as patched |
-| Switch build | the runtime, RT64, the launcher and the game compile with devkitA64 and link with the Vulkan driver into an NRO |
-| NRO | name "Bomberman Hero", author "hazevauks", 256x256 icon |
+| Dependency patches | each applies to a clean copy of its pinned commit |
+| NRO | name "Bomberman Hero", author "hazevauks", 256x256 icon; only Mesa 26.2.4 inside |
 
-None of this says the game runs: it has not been started on a console or an emulator yet.
-
-## Needs a console
+## Not checked yet
 
 Each line is a test for real hardware. A run leaves `bmhero_log.txt` in `sd:/switch/BombermanHeroNX/SD_LOG/`,
 which is what to bring back, whatever happened.
 
 | Test | Passes when |
 | --- | --- |
-| Start | the launcher appears, with its buttons and the frame rate in a corner |
-| ROM | with `bmhero.z64` in the folder **Start Game** is available at once; with another name, **Select ROM** finds and accepts it |
-| Boot | the Hudson logo and the title screen appear, with sound |
-| Menus and HUD | text, icons and transparent layers look right; A chooses, B goes back |
-| On foot | a stage of Planet Bomber plays from start to finish: jumps, throws, set bombs, camera |
-| Vehicle stages | Bomber Jet, Marine, Copter and Slider control and draw correctly |
-| Bosses and cutscenes | one boss fight and one story scene, start to finish |
+| Docked | the game runs at 60 fps on a TV; the `frames:` lines of the log |
+| The whole game | every world plays from start to finish, vehicle stages and bosses included |
+| Cutscenes | the story scenes play with picture and sound in step |
 | Saves | a save made in one run loads in the next |
 | Settings menu | **−** opens it over the game; a changed option is kept after a restart |
 | Leaving | the HOME button, sleep and wake, and quitting from the menu all work |
-| Frame rate | the `frames:` lines of the log, handheld and docked, at the standard clocks |
-| Memory | no crash after 30 minutes; the `memory:` line of the log at startup |
+| Second start | with the shader cache filled, the first minute no longer stutters |
+| Long session | no crash or slowdown after 30 minutes |
 
 ## Known limits
 
 - **Album launches are refused.** From the album the homebrew menu has too little memory; the port explains this
   and returns. Start the homebrew menu from a game.
+- **The first start stutters.** Shaders are compiled the first time each one is needed and kept in `cache/`.
 - **Mods that change game code are off.** Texture packs and data mods load; code mods need a way of loading code
   that Horizon allows, which is not written yet.
+- **The start of the log can be scrambled.** The port and its libraries write to the log file through separate
+  handles, and their first lines overwrite one another. The timings further down are not affected.
 - **Memory.** The runtime sets aside 512 MB for the N64's address space, as on PC. It fits easily, but it is more
   than the game uses and can be trimmed.
-- **First start is slow.** Shaders are compiled the first time each one is needed and kept in `cache/`. Expect
-  hitches in the first minutes of a fresh install.
 - **Tuning aids are on.** The frame rate is drawn on screen and stage timings go to the log. Empty files named
   `no-fps` and `no-profile` in `config/` turn them off.
 
-## Performance target
+## Reading the log
 
-A steady 60 fps at the standard clocks: CPU 1020 MHz, GPU 307 MHz handheld, memory 1331 MHz. The game's own
-logic runs at 30 fps; RT64 draws the frames in between. No measurements exist yet. The log is set up to produce
-them: a `clocks:` line at startup, `frames:` every five seconds, and `profile:` lines that split a frame into its
-stages (display list, texture uploads, framebuffer copies, GPU wait, presentation).
+A `clocks:` line at startup, a `frames:` line every five seconds (frame rate, slowest frame, late frames) and
+`profile:` lines that split a frame into its stages: display list, texture uploads, framebuffer copies, GPU wait,
+presentation. [SD_LOG/README.md](../SD_LOG/README.md) lists the files and the switches for testing.
