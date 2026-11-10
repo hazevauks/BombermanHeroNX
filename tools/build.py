@@ -7,6 +7,7 @@
     python tools/build.py recomp <rom>   turn the ROM and the game patches into C code
     python tools/build.py nro            cross-compile the NRO with devkitA64
     python tools/build.py sd [--rom R]   lay out SD_CARD/, ready to copy to the card
+    python tools/build.py release        zip what is in SD_CARD/ for a release, without the ROM
 
     python tools/build.py sdk <zip>      unpack the Vulkan driver SDK into third_party/nvk-sdk (once)
     python tools/build.py deps --refresh rewrite switch/patches from the changes made in lib/
@@ -343,6 +344,35 @@ def command_sd(arguments: argparse.Namespace) -> None:
           + ("" if (SD_APP_DIR / ROM_NAME).exists() else f" (add your ROM as {ROM_NAME})"))
 
 
+# ---- release archive
+
+
+def project_version() -> str:
+    text = (ROOT / "switch" / "cmake" / "SwitchTarget.cmake").read_text(encoding="utf-8")
+    match = re.search(r'set\(BMHERO_SWITCH_VERSION "([^"]+)"', text)
+    if match is None:
+        raise BuildError("switch/cmake/SwitchTarget.cmake has no BMHERO_SWITCH_VERSION")
+    return match.group(1)
+
+
+def command_release(arguments: argparse.Namespace) -> None:
+    """Zips the build that is in SD_CARD/, the one that was tested, and nothing a player has to supply."""
+    step("Release archive")
+    if not (SD_APP_DIR / "BombermanHeroNX.nro").exists():
+        raise BuildError("SD_CARD/ is empty: python tools/build.py sd")
+
+    # Named one by one: whatever else sits in the folder (a ROM, saves, logs) must never be published.
+    files = [SD_APP_DIR / "BombermanHeroNX.nro", SD_APP_DIR / "recompcontrollerdb.txt"]
+    files += sorted(path for path in (SD_APP_DIR / "assets").rglob("*") if path.is_file())
+
+    archive_path = ROOT / "build" / f"BombermanHeroNX-{project_version()}.zip"
+    archive_path.parent.mkdir(exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in files:
+            archive.write(path, path.relative_to(ROOT / "SD_CARD").as_posix())
+    print(f"  {archive_path.relative_to(ROOT)}: {len(files)} files, {archive_path.stat().st_size / 1e6:.1f} MB")
+
+
 # ---- Vulkan driver SDK
 
 
@@ -402,6 +432,9 @@ def main() -> int:
     sub = commands.add_parser("sd", help="lay out SD_CARD/")
     sub.add_argument("--rom", help="also copy your ROM into the layout")
     sub.set_defaults(function=command_sd)
+
+    commands.add_parser("release", help="zip SD_CARD/ for a release, without the ROM").set_defaults(
+        function=command_release)
 
     sub = commands.add_parser("sdk", help="unpack the Vulkan driver SDK")
     sub.add_argument("archive")
