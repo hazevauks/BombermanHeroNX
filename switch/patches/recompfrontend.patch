@@ -1,0 +1,1013 @@
+diff --git a/recompinput/CMakeLists.txt b/recompinput/CMakeLists.txt
+index 899372b..4fdff7c 100644
+--- a/recompinput/CMakeLists.txt
++++ b/recompinput/CMakeLists.txt
+@@ -42,7 +42,7 @@ target_include_directories(recompinput PRIVATE
+ 
+ if (WIN32)
+     target_include_directories(recompinput PRIVATE ${sdl2_SOURCE_DIR}/include)
+-elseif (APPLE OR CMAKE_SYSTEM_NAME MATCHES "Linux")
++elseif (APPLE OR CMAKE_SYSTEM_NAME MATCHES "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+     target_include_directories(recompinput PRIVATE ${SDL2_INCLUDE_DIRS})
+ endif()
+ 
+diff --git a/recompinput/src/input_events.cpp b/recompinput/src/input_events.cpp
+index c76a1dc..ce163a4 100644
+--- a/recompinput/src/input_events.cpp
++++ b/recompinput/src/input_events.cpp
+@@ -9,8 +9,25 @@ static struct {
+     std::list<std::filesystem::path> files_dropped;
+ } DropState;
+ 
++#if defined(__SWITCH__)
++extern "C" bool switch_manual_screenshot_enabled();
++extern "C" bool switch_request_manual_screenshot();
++#endif
++
+ namespace recompinput {
+ 
++#if defined(__SWITCH__)
++static Uint8 switch_face_button_from_sdl_position(Uint8 button) {
++    switch (button) {
++    case SDL_CONTROLLER_BUTTON_A: return SDL_CONTROLLER_BUTTON_B;
++    case SDL_CONTROLLER_BUTTON_B: return SDL_CONTROLLER_BUTTON_A;
++    case SDL_CONTROLLER_BUTTON_X: return SDL_CONTROLLER_BUTTON_Y;
++    case SDL_CONTROLLER_BUTTON_Y: return SDL_CONTROLLER_BUTTON_X;
++    default: return button;
++    }
++}
++#endif
++
+ void queue_if_enabled(SDL_Event* event) {
+     if (!recompinput::all_input_disabled() && !binding::should_skip_events()) {
+         recompui::queue_event(*event);
+@@ -39,6 +56,23 @@ void purge_deferred_controller_profiles() {
+ }
+ 
+ bool sdl_event_filter(void* userdata, SDL_Event* event) {
++#if defined(__SWITCH__)
++    if (event->type == SDL_CONTROLLERBUTTONDOWN || event->type == SDL_CONTROLLERBUTTONUP) {
++        event->cbutton.button = switch_face_button_from_sdl_position(event->cbutton.button);
++    }
++
++    // Reserve R3 for zero-menu texture debugging on Switch. Consume both
++    // edges so it never leaks into an N64 or frontend binding.
++    if ((event->type == SDL_CONTROLLERBUTTONDOWN || event->type == SDL_CONTROLLERBUTTONUP) &&
++        (event->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) &&
++        switch_manual_screenshot_enabled()) {
++        if (event->type == SDL_CONTROLLERBUTTONDOWN) {
++            switch_request_manual_screenshot();
++        }
++        return false;
++    }
++#endif
++
+     switch (event->type) {
+     case SDL_EventType::SDL_KEYDOWN:
+     {
+diff --git a/recompinput/src/input_state.cpp b/recompinput/src/input_state.cpp
+index 03ed871..138cbd7 100644
+--- a/recompinput/src/input_state.cpp
++++ b/recompinput/src/input_state.cpp
+@@ -11,6 +11,20 @@
+ 
+ using namespace recompinput;
+ 
++#if defined(__SWITCH__)
++extern "C" bool switch_manual_screenshot_enabled();
++
++static SDL_GameControllerButton switch_face_button_to_sdl_position(SDL_GameControllerButton button) {
++    switch (button) {
++    case SDL_CONTROLLER_BUTTON_A: return SDL_CONTROLLER_BUTTON_B;
++    case SDL_CONTROLLER_BUTTON_B: return SDL_CONTROLLER_BUTTON_A;
++    case SDL_CONTROLLER_BUTTON_X: return SDL_CONTROLLER_BUTTON_Y;
++    case SDL_CONTROLLER_BUTTON_Y: return SDL_CONTROLLER_BUTTON_X;
++    default: return button;
++    }
++}
++#endif
++
+ template <typename T>
+ using InputArray = std::array<T, max_num_players_supported>;
+ 
+@@ -137,6 +151,15 @@ void recompinput::update_rumble() {
+ bool controller_button_state(int controller_num, int32_t input_id) {
+     if (input_id >= 0 && input_id < SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_MAX) {
+         SDL_GameControllerButton button = (SDL_GameControllerButton)input_id;
++#if defined(__SWITCH__)
++        if ((button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) &&
++            switch_manual_screenshot_enabled()) {
++            return false;
++        }
++#endif
++#if defined(__SWITCH__)
++        button = switch_face_button_to_sdl_position(button);
++#endif
+         bool ret = false;
+         {
+             std::lock_guard lock{ InputState.controllers_mutex };
+diff --git a/recompui/CMakeLists.txt b/recompui/CMakeLists.txt
+index b9c5458..ae7d0af 100644
+--- a/recompui/CMakeLists.txt
++++ b/recompui/CMakeLists.txt
+@@ -103,7 +103,7 @@ target_include_directories(recompui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include
+ 
+ if (WIN32)
+     target_include_directories(recompui PRIVATE ${sdl2_SOURCE_DIR}/include)
+-elseif (APPLE OR CMAKE_SYSTEM_NAME MATCHES "Linux")
++elseif (APPLE OR CMAKE_SYSTEM_NAME MATCHES "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+     target_include_directories(recompui PRIVATE ${SDL2_INCLUDE_DIRS})
+ endif()
+ 
+diff --git a/recompui/include/recompui/config.h b/recompui/include/recompui/config.h
+index 38b84f5..6dc00f1 100644
+--- a/recompui/include/recompui/config.h
++++ b/recompui/include/recompui/config.h
+@@ -137,6 +137,11 @@ namespace recompui {
+         void open();
+         bool close();
+ 
++        // Called on the UI thread before visible config contexts update.
++        // Use for live status; it must not modify pending option values.
++        void set_refresh_callback(std::function<void()> callback);
++        void refresh();
++
+         // Get the config modal instance. nullptr until created with init_modal() internally.
+         // Will throw an error if it hasn't been created yet.
+         recompui::TabbedModal *get_config_modal();
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 277a421..0ebf4ac 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -5,6 +5,7 @@
+ #include <SDL2/SDL_video.h>
+ #endif
+ #include <chrono>
++#include <cstdio>
+ 
+ #include "rt64_render_hooks.h"
+ 
+@@ -33,6 +34,14 @@
+ #include "rml_elements/ui_rml_elements.h"
+ #include "util/file.h"
+ 
++#if defined(__SWITCH__)
++void switch_log_checkpoint(const char*, bool);
++extern "C" float switch_fps_value() __attribute__((weak));
++#define RECOMPUI_SWITCH_CHECKPOINT(message) ::switch_log_checkpoint(message, false)
++#else
++#define RECOMPUI_SWITCH_CHECKPOINT(message) ((void)0)
++#endif
++
+ static std::atomic_bool cursor_enabled = true;
+ 
+ void recompui::open_quit_game_prompt() {
+@@ -215,6 +224,12 @@ public:
+     std::unique_ptr<SystemInterface_SDL> system_interface;
+     recompui::RmlRenderInterface_RT64 render_interface;
+     Rml::Context* context;
++#if defined(__SWITCH__)
++    // This separate context never captures menu/controller input.
++    Rml::Context* fps_context = nullptr;
++    Rml::Element* fps_text = nullptr;
++    std::string fps_label;
++#endif
+     recompui::UiEventListenerInstancer event_listener_instancer;
+ 
+     UIState(const UIState& rhs) = delete;
+@@ -225,14 +240,19 @@ public:
+     UIState(SDL_Window* window, plume::RenderInterface* interface, plume::RenderDevice* device) {
+ 
+         system_interface = std::make_unique<SystemInterface_SDL>();
++        RECOMPUI_SWITCH_CHECKPOINT("ui: SDL system interface ready");
++#if !defined(__SWITCH__)
+         system_interface->SetWindow(window);
++#endif
+         render_interface.init(interface, device);
++        RECOMPUI_SWITCH_CHECKPOINT("ui: render interface ready");
+ 
+         Rml::SetSystemInterface(system_interface.get());
+         Rml::SetRenderInterface(render_interface.get_rml_interface());
+         Rml::Factory::RegisterEventListenerInstancer(&event_listener_instancer);
+ 
+         Rml::Initialise();
++        RECOMPUI_SWITCH_CHECKPOINT("ui: RmlUi initialized");
+ 
+         recompui::register_custom_elements();
+ 
+@@ -240,11 +260,18 @@ public:
+         recompui::apply_color_hack();
+ 
+         int width, height;
++#if defined(__SWITCH__)
++        width = 1280;
++        height = 720;
++#else
+         SDL_GetWindowSizeInPixels(window, &width, &height);
++#endif
+         
+         context = Rml::CreateContext("main", Rml::Vector2i(width, height));
++        RECOMPUI_SWITCH_CHECKPOINT("ui: RmlUi context created");
+ 
+         Rml::Debugger::Initialise(context);
++        RECOMPUI_SWITCH_CHECKPOINT("ui: RmlUi debugger initialized");
+         {
+             struct FontFace {
+                 const char* filename;
+@@ -272,14 +299,39 @@ public:
+                 Rml::LoadFontFace(extra_font_path.string(), false);
+             }
+         }
++        RECOMPUI_SWITCH_CHECKPOINT("ui: fonts loaded");
++#if defined(__SWITCH__)
++        const char* fps_setting = SDL_getenv("RECOMP_SWITCH_FPS");
++        if (switch_fps_value && (!fps_setting || *fps_setting != '0')) {
++            fps_context = Rml::CreateContext("switch_fps", {width, height});
++            if (!fps_context) throw std::runtime_error("Failed to create FPS overlay context");
++            auto* document = fps_context->LoadDocumentFromMemory(R"rml(
++                <rml><head><style>
++                    body { margin: 0px; font-size: 22px; color: #ffffff; pointer-events: none; }
++                    #switch-fps { position: absolute; left: 16px; top: 14px; width: 132px;
++                        padding: 6px 10px; background-color: #000000b0; text-align: center; }
++                </style></head><body><div id="switch-fps">FPS --.-</div></body></rml>
++            )rml");
++            if (!document) throw std::runtime_error("Failed to load FPS overlay document");
++            document->SetProperty("font-family", primary_font_family);
++            fps_text = document->GetElementById("switch-fps");
++            document->Show(Rml::ModalFlag::None, Rml::FocusFlag::None);
++            RECOMPUI_SWITCH_CHECKPOINT("ui: FPS counter enabled");
++        }
++#endif
+     }
+ 
+     void create_menus() {
+         recompui::init_styling(recompui::file::get_asset_path("recomp.rcss"));
++        RECOMPUI_SWITCH_CHECKPOINT("ui: styling initialized");
+         recompui::init_launcher_menu();
++        RECOMPUI_SWITCH_CHECKPOINT("ui: launcher initialized");
+         recompui::init_prompt_context();
++        RECOMPUI_SWITCH_CHECKPOINT("ui: prompt initialized");
+         recompui::AssignPlayersModal::init();
++        RECOMPUI_SWITCH_CHECKPOINT("ui: player modal initialized");
+         recompui::config::init_modal();
++        RECOMPUI_SWITCH_CHECKPOINT("ui: config modal initialized");
+     }
+ 
+     void unload() {
+@@ -499,7 +551,12 @@ std::recursive_mutex ui_state_mutex{};
+ extern SDL_Window* window;
+ 
+ void recompui::get_window_size(int& width, int& height) {
++#if defined(__SWITCH__)
++    width = 1280;
++    height = 720;
++#else
+     SDL_GetWindowSizeInPixels(window, &width, &height);
++#endif
+ }
+ 
+ inline const std::string read_file_to_string(std::filesystem::path path) {
+@@ -510,11 +567,14 @@ inline const std::string read_file_to_string(std::filesystem::path path) {
+ }
+ 
+ void init_hook(plume::RenderInterface* interface, plume::RenderDevice* device) {
++    RECOMPUI_SWITCH_CHECKPOINT("ui: init hook entered");
+ #if defined(__linux__)
+     std::locale::global(std::locale::classic());
+ #endif
+     ui_state = std::make_unique<UIState>(window, interface, device);
++    RECOMPUI_SWITCH_CHECKPOINT("ui: state constructed");
+     ui_state->create_menus();
++    RECOMPUI_SWITCH_CHECKPOINT("ui: init hook complete");
+ }
+ 
+ moodycamel::ConcurrentQueue<SDL_Event> ui_event_queue{};
+@@ -647,6 +707,9 @@ void recompui::activate_mouse() {
+ }
+ 
+ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
++#if defined(__SWITCH__)
++    static bool trace_first_draw = true;
++#endif
+ 
+     apply_background_input_mode();
+ 
+@@ -657,7 +720,13 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+ 
+     // Return to the launcher if no menu is open and the game isn't started.
+     if (!recompui::is_any_context_shown() && !ultramodern::is_game_started()) {
++#if defined(__SWITCH__)
++        if (trace_first_draw) RECOMPUI_SWITCH_CHECKPOINT("ui draw: launcher show entered");
++#endif
+         recompui::show_context(recompui::get_launcher_context_id(), "");
++#if defined(__SWITCH__)
++        if (trace_first_draw) RECOMPUI_SWITCH_CHECKPOINT("ui draw: launcher show returned");
++#endif
+     }
+ 
+     std::lock_guard lock{ ui_state_mutex };
+@@ -859,11 +928,19 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+     ui_state->update_primary_input(mouse_moved, non_mouse_interacted);
+     ui_state->update_focus(mouse_moved, non_mouse_interacted);
+ 
+-    if (recompui::is_any_context_shown()) {
++    bool render_ui = recompui::is_any_context_shown();
++#if defined(__SWITCH__)
++    render_ui = render_ui || ui_state->fps_context;
++#endif
++    if (render_ui) {
++#if defined(__SWITCH__)
++        if (trace_first_draw) RECOMPUI_SWITCH_CHECKPOINT("ui draw: visible context entered");
++#endif
+         if (recompui::is_context_shown(recompui::get_launcher_context_id())) {
+             recompui::update_launcher_menu();
+         }
+ 
++        if (recompui::is_context_shown(recompui::config::get_config_context_id())) recompui::config::refresh();
+         ui_state->update_contexts();
+ 
+         int width = swap_chain_framebuffer->getWidth();
+@@ -884,9 +961,39 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+         prev_height = height;
+ 
+         ui_state->context->Update();
++#if defined(__SWITCH__)
++        if (trace_first_draw) RECOMPUI_SWITCH_CHECKPOINT("ui draw: RmlUi update returned");
++#endif
+         ui_state->context->Render();
++#if defined(__SWITCH__)
++        if (trace_first_draw) RECOMPUI_SWITCH_CHECKPOINT("ui draw: RmlUi render returned");
++#endif
++#if defined(__SWITCH__)
++        if (ui_state->fps_context) {
++            ui_state->fps_context->SetDimensions({width, height});
++            char label[32];
++            const float fps = switch_fps_value();
++            if (fps > 0.0f) std::snprintf(label, sizeof(label), "FPS %.1f", double(fps));
++            else std::snprintf(label, sizeof(label), "FPS --.-");
++            if (ui_state->fps_label != label) {
++                ui_state->fps_label = label;
++                ui_state->fps_text->SetInnerRML(label);
++            }
++            ui_state->fps_context->Update();
++            ui_state->fps_context->Render();
++        }
++#endif
+         ui_state->render_interface.end(command_list, swap_chain_framebuffer);
++#if defined(__SWITCH__)
++        if (trace_first_draw) RECOMPUI_SWITCH_CHECKPOINT("ui draw: render interface ended");
++#endif
++    }
++#if defined(__SWITCH__)
++    else if (trace_first_draw) {
++        RECOMPUI_SWITCH_CHECKPOINT("ui draw: no visible context");
+     }
++    trace_first_draw = false;
++#endif
+ }
+ 
+ void deinit_hook() {
+diff --git a/recompui/src/composites/ui_mod_installer.cpp b/recompui/src/composites/ui_mod_installer.cpp
+index 1f98b3c..3024b9f 100644
+--- a/recompui/src/composites/ui_mod_installer.cpp
++++ b/recompui/src/composites/ui_mod_installer.cpp
+@@ -15,6 +15,11 @@ namespace recompui {
+         return file_path.extension() == ".so" || file_path.filename().string().find(".so.") != std::string::npos;
+ #elif defined(__APPLE__)
+         return file_path.extension() == ".dylib";
++#elif defined(__SWITCH__)
++        // Horizon builds intentionally disable dynamic code modules. Data-only
++        // NRM/RTZ content is still installed and scanned normally.
++        (void)file_path;
++        return false;
+ #else
+         static_assert(false, "Unimplemented for this platform.");
+ #endif
+diff --git a/recompui/src/composites/ui_mod_menu.cpp b/recompui/src/composites/ui_mod_menu.cpp
+index 02455fd..54e4c6a 100644
+--- a/recompui/src/composites/ui_mod_menu.cpp
++++ b/recompui/src/composites/ui_mod_menu.cpp
+@@ -298,7 +298,7 @@ void ModMenu::open_mods_folder() {
+ #elif defined(__APPLE__)
+     std::string command = "open \"" + mods_directory.string() + "\"";
+     std::system(command.c_str());
+-#else
++#elif !defined(__SWITCH__)
+     static_assert(false, "Not implemented for this platform.");
+ #endif
+ }
+diff --git a/recompui/src/composites/ui_player_card.cpp b/recompui/src/composites/ui_player_card.cpp
+index 7a75884..ece457a 100644
+--- a/recompui/src/composites/ui_player_card.cpp
++++ b/recompui/src/composites/ui_player_card.cpp
+@@ -106,11 +106,12 @@ PlayerCard::PlayerCard(
+             options.emplace_back(profile_name, std::to_string(profile_index));
+         }
+ 
+-        auto select = context.create_element<Select>(
+-            this,
+-            options,
+-            std::to_string(cur_profile)
+-        );
++        // Unassigned players have cur_profile == -1. Keep Select's value tied
++        // to an option that actually exists instead of leaving invalid state.
++        const int displayed_profile = cur_profile >= 0 ? cur_profile :
++            (has_controller ? recompinput::profiles::get_sp_controller_profile_index()
++                            : recompinput::profiles::get_sp_keyboard_profile_index());
++        auto select = context.create_element<Select>(this, options, std::to_string(displayed_profile));
+ 
+         select->add_change_callback([this](SelectOption& option, int option_index) {
+             this->on_select_player_profile(std::stoi(option.value));
+diff --git a/recompui/src/config/ui_config.cpp b/recompui/src/config/ui_config.cpp
+index 6c84c05..740b4c0 100644
+--- a/recompui/src/config/ui_config.cpp
++++ b/recompui/src/config/ui_config.cpp
+@@ -16,8 +16,11 @@ struct PendingTab {
+ };
+ static std::vector<PendingTab> pending_tabs;
+ static bool loaded_configs = false;
++static std::function<void()> refresh_callback;
+ 
+ namespace recompui {
++    void config::set_refresh_callback(std::function<void()> callback) { refresh_callback = std::move(callback); }
++    void config::refresh() { if (refresh_callback) refresh_callback(); }
+     static recompui::TabbedModal *config_modal = nullptr;
+ 
+     recomp::config::Config &config::get_config(const std::string &id) {
+diff --git a/recompui/src/config/ui_config_option.cpp b/recompui/src/config/ui_config_option.cpp
+index 86428c9..c00848c 100644
+--- a/recompui/src/config/ui_config_option.cpp
++++ b/recompui/src/config/ui_config_option.cpp
+@@ -116,10 +116,28 @@ ConfigOptionEnum::ConfigOptionEnum(
+     wrapper->set_justify_content(JustifyContent::FlexStart);
+     wrapper->set_width(100.0f, Unit::Percent);
+     wrapper->set_gap(12.0f);
++    auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(option_index);
++    const bool use_select = enum_opt.options.size() > 5;
++    if (use_select || config->id == "switch_performance") {
++        wrapper->set_flex_direction(FlexDirection::Column);
++        wrapper->set_align_items(AlignItems::FlexStart);
++    }
+ 
+     // Negates the extra padding that radio tabs automatically add.
+     name_label->set_margin_bottom(4.0f);
+ 
++    if (use_select) {
++        auto *holder = context.create_element<Element>(wrapper, 0, "div", false);
++        holder->set_width(320.0f);
++        holder->set_flex_shrink(0.0f);
++        std::vector<SelectOption> choices;
++        for (const auto& option : enum_opt.options) choices.emplace_back(option.name, std::to_string(option.value));
++        select = context.create_element<Select>(holder, choices, std::to_string(std::get<uint32_t>(get_value())));
++        select->add_change_callback([this](SelectOption&, int index) {
++            const auto& options = this->config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index).options;
++            if (index >= 0 && size_t(index) < options.size()) this->set_option_value(this->option_id, options[index].value);
++        });
++    } else {
+     radio = context.create_element<Radio>(wrapper);
+     radio->set_focus_callback([this](bool active) {
+         if (active) {
+@@ -132,13 +150,15 @@ ConfigOptionEnum::ConfigOptionEnum(
+             this->set_option_value(this->option_id, enum_opt.options[index].value);
+         }
+     });
++    for (const auto& option : enum_opt.options) radio->add_option(option.name);
++    if (enum_opt.options.empty()) radio->set_display(Display::None);
++    }
+ 
+     details_label = context.create_element<Label>(wrapper, "", theme::Typography::LabelXS);
+     details_label->set_color(theme::color::Primary);
+-
+-    auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
+-    for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+-        radio->add_option(enum_opt.options[i].name);
++    if (use_select || config->id == "switch_performance") {
++        details_label->set_width(100.0f, Unit::Percent);
++        details_label->set_white_space(WhiteSpace::Normal);
+     }
+ 
+     update_value();
+@@ -149,6 +169,7 @@ ConfigOptionEnum::ConfigOptionEnum(
+ void ConfigOptionEnum::update_value() {
+     recomp::config::ConfigValueVariant value_variant = get_value();
+     uint32_t option_value = std::get<uint32_t>(value_variant);
++    if (select) { select->set_selection(std::to_string(option_value)); return; }
+ 
+     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
+     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+@@ -176,10 +197,11 @@ void ConfigOptionEnum::update_enum_details() {
+ 
+ void ConfigOptionEnum::update_enum_disabled() {
+     bool all_disabled = get_disabled();
++    if (select) select->set_enabled(!all_disabled);
+     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(option_index);
+     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+         bool enum_disabled = all_disabled || config->get_enum_option_disabled(option_index, i);
+-        auto opt_element = radio->get_option_element(i);
++        Element* opt_element = select ? static_cast<Element*>(select->get_option_element(i)) : static_cast<Element*>(radio->get_option_element(i));
+         opt_element->set_enabled(!enum_disabled);
+     }
+ };
+diff --git a/recompui/src/config/ui_config_option.h b/recompui/src/config/ui_config_option.h
+index 0561657..7de6f7b 100644
+--- a/recompui/src/config/ui_config_option.h
++++ b/recompui/src/config/ui_config_option.h
+@@ -4,6 +4,7 @@
+ #include "elements/ui_element.h"
+ #include "elements/ui_label.h"
+ #include "elements/ui_radio.h"
++#include "elements/ui_select.h"
+ #include "elements/ui_text_input.h"
+ #include "elements/ui_slider.h"
+ #include "elements/ui_toggle.h"
+@@ -48,6 +49,7 @@ namespace recompui {
+ class ConfigOptionEnum : public ConfigOptionElement {
+ protected:
+     Radio *radio = nullptr;
++    Select *select = nullptr;
+     Label *details_label = nullptr;
+ 
+     std::string_view get_type_name() override { return "ConfigOptionEnum"; }
+diff --git a/recompui/src/config/ui_config_tab_graphics.cpp b/recompui/src/config/ui_config_tab_graphics.cpp
+index 4fdf81f..6ba2362 100644
+--- a/recompui/src/config/ui_config_tab_graphics.cpp
++++ b/recompui/src/config/ui_config_tab_graphics.cpp
+@@ -237,7 +237,11 @@ namespace recompui {
+                 "Resolution",
+                 "Sets the output resolution of the game. <recomp-color primary>Original</recomp-color> matches the game's original 240p resolution. <recomp-color primary>Original 2x</recomp-color> will render at 480p. <recomp-color primary>Auto</recomp-color> will scale based on the game window's resolution.",
+                 resolution_options,
++#if defined(__SWITCH__)
++                ultramodern::renderer::Resolution::Original
++#else
+                 ultramodern::renderer::Resolution::Auto
++#endif
+             );
+             {
+                 config.add_option_change_callback(
+@@ -330,7 +334,11 @@ namespace recompui {
+                 "<br />"
+                 "<recomp-color primary>Note: This option won't be available if your GPU does not support programmable MSAA sample positions, as it is currently required to avoid rendering glitches.</recomp-color>",
+                 antialiasing_options,
++#if defined(__SWITCH__)
++                ultramodern::renderer::Antialiasing::None
++#else
+                 ultramodern::renderer::Antialiasing::MSAA2X
++#endif
+             );
+ 
+             config.add_enum_option(
+diff --git a/recompui/src/core/ui_context.cpp b/recompui/src/core/ui_context.cpp
+index e99229a..fe907ec 100644
+--- a/recompui/src/core/ui_context.cpp
++++ b/recompui/src/core/ui_context.cpp
+@@ -236,8 +236,17 @@ void recompui::init_styling(const std::filesystem::path& rcss_file) {
+     std::string style{};
+     {
+         std::ifstream style_stream{rcss_file};
++        if (!style_stream) {
++            return;
++        }
++
+         style_stream.seekg(0, std::ios::end);
+-        style.resize(style_stream.tellg());
++        const std::streampos style_size = style_stream.tellg();
++        if (style_size <= 0) {
++            return;
++        }
++
++        style.resize(static_cast<size_t>(style_size));
+         style_stream.seekg(0, std::ios::beg);
+ 
+         style_stream.read(style.data(), style.size());
+@@ -246,7 +255,10 @@ void recompui::init_styling(const std::filesystem::path& rcss_file) {
+     rml_stream->SetSourceURL(rcss_file.filename().string());
+ 
+     // Merge user rcss with base rcss.
+-    context_state.style_sheet->MergeStyleSheetContainer(*Rml::Factory::InstanceStyleSheetStream(rml_stream.get()));
++    auto user_style_sheet = Rml::Factory::InstanceStyleSheetStream(rml_stream.get());
++    if (user_style_sheet != nullptr) {
++        context_state.style_sheet->MergeStyleSheetContainer(*user_style_sheet);
++    }
+ 
+     Rml::RegisterPlugin(&init_base_rcss_plugin_instance);
+ }
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+index b057f46..fcd4a5c 100644
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -4,6 +4,8 @@
+ #include "recompinput/recompinput.h"
+ #include "recompinput/profiles.h"
+ 
++#include <algorithm>
++
+ namespace recompui {
+ 
+ class ModalOverlay : public Element {
+@@ -247,6 +249,10 @@ void Modal::render_menu_actions() {
+     if (last_input_device == recompinput::InputDevice::COUNT) {
+         return;
+     }
++
++#if defined(__SWITCH__)
++    std::vector<recompinput::InputField> displayed_inputs;
++#endif
+     
+     for (auto &action : menu_action_order) {
+         auto it = menu_action_callbacks.find(action);
+@@ -274,6 +280,16 @@ void Modal::render_menu_actions() {
+                 ) {
+                     continue;
+                 }
++#if defined(__SWITCH__)
++                // Saved profiles can bind Back and Toggle/Close to the same
++                // physical Switch button. Showing both hints makes the footer
++                // look like two identical ways out of the menu, while only one
++                // action can actually win event dispatch. Keep the first hint
++                // in menu_action_order and suppress repeated bindings.
++                if (std::find(displayed_inputs.begin(), displayed_inputs.end(), binding) != displayed_inputs.end()) {
++                    continue;
++                }
++#endif
+                 bound_inputs.push_back(binding);
+             }
+         }
+@@ -282,6 +298,10 @@ void Modal::render_menu_actions() {
+             continue;
+         }
+ 
++#if defined(__SWITCH__)
++        displayed_inputs.insert(displayed_inputs.end(), bound_inputs.begin(), bound_inputs.end());
++#endif
++
+         auto action_wrapper = context.create_element<Element>(menu_actions_wrapper, 0, "span", false);
+         action_wrapper->set_display(Display::Flex);
+         action_wrapper->set_flex_direction(FlexDirection::Row);
+diff --git a/recompui/src/elements/ui_select.h b/recompui/src/elements/ui_select.h
+index cc4932c..96746bb 100644
+--- a/recompui/src/elements/ui_select.h
++++ b/recompui/src/elements/ui_select.h
+@@ -71,6 +71,7 @@ namespace recompui {
+             std::string selected_option_value = ""
+         );
+         void add_change_callback(std::function<void(SelectOption& option, int option_index)> callback);
++        Option* get_option_element(size_t index) { return option_elements.at(index); }
+         Style* get_hover_style() { return &hover_style; }
+         Style* get_focus_style() { return &focus_style; }
+         Style* get_disabled_style() { return &disabled_style; }
+diff --git a/recompui/src/renderer/rt64_render_context.cpp b/recompui/src/renderer/rt64_render_context.cpp
+index a7954c7..ede0c2e 100644
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -1,5 +1,6 @@
+ #include <memory>
+ #include <cstring>
++#include <cstdio>
+ #include <variant>
+ #include <algorithm>
+ 
+@@ -15,6 +16,10 @@
+ #include "recompui/config.h"
+ #include "concurrentqueue.h"
+ 
++#if defined(__SWITCH__)
++void switch_log_checkpoint(const char*, bool);
++#endif
++
+ using namespace recompui;
+ 
+ static RT64::UserConfiguration::Antialiasing device_max_msaa = RT64::UserConfiguration::Antialiasing::None;
+@@ -177,6 +182,19 @@ void set_application_user_config(RT64::Application* application, const ultramode
+     application->userConfig.refreshRateTarget = config.rr_manual_value;
+     application->userConfig.internalColorFormat = to_rt64(config.hpfb_option);
+     application->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
++
++#if defined(__SWITCH__)
++    // Game resolution, downsampling and MSAA come from the graphics menu.
++    // Keep the proven scanout/color format independently of those selections.
++    application->userConfig.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::Standard;
++    application->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Double;
++    char settings[256]{};
++    std::snprintf(settings, sizeof(settings),
++        "renderer settings: resolution=%u scale=%.2f downsample=%u msaa=%u output=1280x720",
++        static_cast<unsigned>(application->userConfig.resolution), application->userConfig.resolutionMultiplier,
++        application->userConfig.downsampleMultiplier, application->userConfig.msaaSampleCount());
++    switch_log_checkpoint(settings, false);
++#endif
+ }
+ 
+ ultramodern::renderer::SetupResult map_setup_result(RT64::Application::SetupResult rt64_result) {
+@@ -218,6 +236,9 @@ ultramodern::renderer::GraphicsApi map_graphics_api(RT64::UserConfiguration::Gra
+ }
+ 
+ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, ultramodern::renderer::PresentationMode presentation_mode, bool debug) {
++#if defined(__SWITCH__)
++    ::switch_log_checkpoint("renderer: RT64Context entered", false);
++#endif
+     static unsigned char dummy_rom_header[0x40];
+     recompui::set_render_hooks();
+ 
+@@ -227,6 +248,8 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
+     appCore.window = window_handle.window;
+ #elif defined(__linux__) || defined(__ANDROID__)
+     appCore.window = window_handle;
++#elif defined(__SWITCH__)
++    appCore.window = reinterpret_cast<plume::RenderWindow>(window_handle);
+ #elif defined(__APPLE__)
+     appCore.window.window = window_handle.window;
+     appCore.window.view = window_handle.view;
+@@ -272,6 +295,9 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
+ 
+     // Create the RT64 application.
+     app = std::make_unique<RT64::Application>(appCore, appConfig);
++#if defined(__SWITCH__)
++    ::switch_log_checkpoint("renderer: RT64 application allocated", false);
++#endif
+ 
+     // Set initial user config settings based on the current settings.
+     auto& cur_config = ultramodern::renderer::get_graphics_config();
+@@ -304,8 +330,14 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
+     uint32_t thread_id = 0;
+ #ifdef _WIN32
+     thread_id = window_handle.thread_id;
++#endif
++#if defined(__SWITCH__)
++    ::switch_log_checkpoint("renderer: RT64 application setup entered", false);
+ #endif
+     setup_result = map_setup_result(app->setup(thread_id));
++#if defined(__SWITCH__)
++    ::switch_log_checkpoint("renderer: RT64 application setup returned", false);
++#endif
+     // Get the API that RT64 chose.
+     chosen_api = map_graphics_api(app->chosenGraphicsAPI);
+     if (setup_result != ultramodern::renderer::SetupResult::Success) {
+@@ -330,6 +362,14 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
+         sample_positions_supported = false;
+     }
+ 
++#if defined(__SWITCH__)
++    char capability_message[128]{};
++    std::snprintf(capability_message, sizeof(capability_message),
++        "renderer MSAA: sample_positions=%u max_samples=%u",
++        unsigned(sample_positions_supported), RT64::UserConfiguration::msaaSampleCount(device_max_msaa));
++    switch_log_checkpoint(capability_message, false);
++#endif
++
+     recompui::config::graphics::update_msaa_supported(sample_positions_supported);
+ 
+     high_precision_fb_enabled = app->shaderLibrary->usesHDR;
+@@ -345,19 +385,55 @@ void renderer::RT64Context::send_dl(const OSTask* task) {
+ }
+ 
+ void renderer::RT64Context::send_dummy_workload(uint32_t fb_address) {
++#if defined(__SWITCH__)
++    static bool first_dummy = true;
++    const bool trace_dummy = first_dummy;
++    if (trace_dummy) ::switch_log_checkpoint("renderer: dummy list begin entered", false);
++#endif
+     app->state->listProcessBegin();
++#if defined(__SWITCH__)
++    if (trace_dummy) ::switch_log_checkpoint("renderer: dummy list begin returned", false);
++#endif
+     app->state->rdp->setColorImage(G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, fb_address);
++#if defined(__SWITCH__)
++    if (trace_dummy) ::switch_log_checkpoint("renderer: dummy color image set", false);
++#endif
+     // G_AD_DISABLE | G_CD_MAGICSQ | G_CK_NONE | G_TC_FILT | G_TF_BILERP | G_TT_NONE | G_TL_TILE | G_TD_CLAMP | G_TP_PERSP | G_CYC_FILL | G_PM_NPRIMITIVE
+     // G_AC_NONE | G_ZS_PIXEL | G_RM_NOOP | G_RM_NOOP2
+     app->state->rdp->setOtherMode(0x382C30, 0);
++#if defined(__SWITCH__)
++    if (trace_dummy) ::switch_log_checkpoint("renderer: dummy other mode set", false);
++#endif
+     app->state->rdp->fillRect(0, 0, 320 << 2, 240 << 2);
++#if defined(__SWITCH__)
++    if (trace_dummy) ::switch_log_checkpoint("renderer: dummy fill rectangle set", false);
++#endif
+     app->state->fullSync();
++#if defined(__SWITCH__)
++    if (trace_dummy) ::switch_log_checkpoint("renderer: dummy full sync returned", false);
++#endif
+     app->state->listProcessEnd();
++#if defined(__SWITCH__)
++    if (trace_dummy) {
++        ::switch_log_checkpoint("renderer: dummy list end returned", false);
++        first_dummy = false;
++    }
++#endif
+ }
+ 
+ void renderer::RT64Context::update_screen() {
++#if defined(__SWITCH__)
++    static bool first_update = true;
++    if (first_update) ::switch_log_checkpoint("renderer: first updateScreen entered", false);
++#endif
+     check_refresh_rate_changes();
+     app->updateScreen();
++#if defined(__SWITCH__)
++    if (first_update) {
++        ::switch_log_checkpoint("renderer: first updateScreen returned", false);
++        first_update = false;
++    }
++#endif
+ }
+ 
+ void renderer::RT64Context::shutdown() {
+@@ -382,11 +458,21 @@ bool renderer::RT64Context::update_config(const ultramodern::renderer::GraphicsC
+     bool aspect_ratio_changed = new_config.ar_option != old_config.ar_option;
+     bool downsampling_changed = new_config.ds_option != old_config.ds_option;
+     bool msaa_changed = new_config.msaa_option != old_config.msaa_option;
++#if defined(__SWITCH__)
++    if (msaa_changed) {
++        // Publish the new config from inside the idle-queue transaction, after
++        // sample-count-dependent shaders and targets have been replaced.
++        app->updateMultisampling();
++    }
++    else {
++        app->updateUserConfig(resolution_changed || aspect_ratio_changed || downsampling_changed);
++    }
++#else
+     app->updateUserConfig(resolution_changed || aspect_ratio_changed || downsampling_changed || msaa_changed);
+-
+     if (msaa_changed) {
+         app->updateMultisampling();
+     }
++#endif
+     return true;
+ }
+ 
+diff --git a/recompui/src/renderer/ui_renderer.cpp b/recompui/src/renderer/ui_renderer.cpp
+index 5ca5349..8c16bd6 100644
+--- a/recompui/src/renderer/ui_renderer.cpp
++++ b/recompui/src/renderer/ui_renderer.cpp
+@@ -32,6 +32,10 @@
+ #   include "InterfacePS.hlsl.metal.h"
+ #endif
+ 
++#if defined(__SWITCH__)
++extern "C" void dusk_switch_log(const char* message);
++#endif
++
+ #ifdef _WIN32
+ #    define GET_SHADER_BLOB(name, format) \
+         ((format) == plume::RenderShaderFormat::SPIRV ? name##BlobSPIRV : \
+@@ -161,11 +165,19 @@ public:
+         interface_ = interface;
+         device_ = device;
+ 
+-        // Enable 4X MSAA if supported by the device.
++        // Enable UI MSAA if supported by the device. The Switch game renderer
++        // deliberately runs without MSAA, so do not silently create a separate
++        // 8x multisampled 720p UI target here. Besides the large bandwidth cost,
++        // the extra NVK resolve path has caused missing glyphs on hardware.
+         const plume::RenderSampleCounts desired_sample_count = plume::RenderSampleCount::COUNT_8;
++#if !defined(__SWITCH__)
+         if (device_->getSampleCountsSupported(SwapChainFormat) & desired_sample_count) {
+             multisampling_.sampleCount = desired_sample_count;
+         }
++#else
++        (void)desired_sample_count;
++        dusk_switch_log("ui renderer: 1280x720, single-sampled");
++#endif
+ 
+         vertex_buffer_.flags_ = plume::RenderBufferFlag::VERTEX;
+         index_buffer_.flags_ = plume::RenderBufferFlag::INDEX;
+@@ -484,7 +496,21 @@ public:
+         }
+ 
+         texture_handle = texture_count_++;
+-        return create_texture(texture_handle, source, source_dimensions);
++        const bool created = create_texture(texture_handle, source, source_dimensions);
++#if defined(__SWITCH__)
++        static uint32_t logged_generated_textures = 0;
++        if (logged_generated_textures < 24) {
++            char message[128]{};
++            std::snprintf(message, sizeof(message),
++                "ui texture: generated #%u handle=%llu size=%dx%d result=%d",
++                logged_generated_textures + 1,
++                static_cast<unsigned long long>(texture_handle),
++                source_dimensions.x, source_dimensions.y, int(created));
++            dusk_switch_log(message);
++            logged_generated_textures++;
++        }
++#endif
++        return created;
+     }
+ 
+     bool create_texture(Rml::TextureHandle texture_handle, const Rml::byte* source, const Rml::Vector2i& source_dimensions, bool flip_y = false, bool bgra = false) {
+@@ -547,6 +573,8 @@ public:
+             copy_command_list_->copyTextureRegion(
+                 plume::RenderTextureCopyLocation::Subresource(texture.get()),
+                 plume::RenderTextureCopyLocation::PlacedFootprint(copy_buffer_.get(), RmlTextureFormat, source_dimensions.x, source_dimensions.y, 1, row_width));
++            copy_command_list_->barriers(plume::RenderBarrierStage::GRAPHICS,
++                plume::RenderTextureBarrier(texture.get(), plume::RenderTextureLayout::SHADER_READ));
+             
+             // End the command list, execute it and wait.
+             copy_command_list_->end();
+@@ -568,6 +596,18 @@ public:
+ 
+ 	void ReleaseTexture(Rml::TextureHandle texture) override {
+         if (texture > 1) {
++#if defined(__SWITCH__)
++            static uint32_t logged_released_textures = 0;
++            if (logged_released_textures < 24) {
++                char message[96]{};
++                std::snprintf(message, sizeof(message),
++                    "ui texture: released #%u handle=%llu",
++                    logged_released_textures + 1,
++                    static_cast<unsigned long long>(texture));
++                dusk_switch_log(message);
++                logged_released_textures++;
++            }
++#endif
+             // Textures #0 and #1 are reserved and should never be released.
+             textures_.erase(texture);
+         }
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+index 7ee84ed..c3ab63d 100644
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -1,7 +1,10 @@
++#include <cctype>
+ #include "file.h"
+ 
+ #include <SDL.h>
++#if !defined(__SWITCH__)
+ #include "nfd.h"
++#endif
+ #include "RmlUi/Core.h"
+ 
+ #include "recompui/program_config.h"
+@@ -20,6 +23,7 @@
+ #endif
+ 
+ namespace recompui {
++#if !defined(__SWITCH__)
+     static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {
+         nfdnchar_t* native_path = nullptr;
+         nfdresult_t result = NFD_OpenDialogN(&native_path, nullptr, 0, nullptr);
+@@ -57,8 +61,15 @@ namespace recompui {
+ 
+         callback(success, paths);
+     }
++#endif
+ 
+     std::filesystem::path file::get_app_folder_path() {
++#if defined(__SWITCH__)
++#ifndef RECOMP_SWITCH_APP_FOLDER
++#error "RECOMP_SWITCH_APP_FOLDER must name the application folder on the SD card"
++#endif
++        return RECOMP_SWITCH_APP_FOLDER;
++#else
+         // directly check for portable.txt (windows and native linux binary)
+         if (std::filesystem::exists("portable.txt")) {
+             return std::filesystem::current_path();
+@@ -112,10 +123,13 @@ namespace recompui {
+ #endif
+ 
+         return recomp_dir;
++#endif
+     }
+ 
+     std::filesystem::path file::get_program_path() {
+-#if defined(__APPLE__)
++#if defined(__SWITCH__)
++        return file::get_app_folder_path();
++#elif defined(__APPLE__)
+         return file::apple::get_bundle_resource_directory();
+ #elif defined(__linux__) && defined(RECOMP_FLATPAK)
+         return "/app/bin";
+@@ -129,7 +143,20 @@ namespace recompui {
+     }
+ 
+     void file::open_file_dialog(std::function<void(bool success, const std::filesystem::path& path)> callback) {
+-#ifdef __APPLE__
++#if defined(__SWITCH__)
++        // Horizon has no file picker: the ROM is the first N64 image found in the application folder.
++        std::filesystem::path rom_path;
++        std::error_code error;
++        for (const auto &entry : std::filesystem::directory_iterator(file::get_app_folder_path(), error)) {
++            std::string extension = entry.path().extension().string();
++            for (char &c : extension) c = char(std::tolower(static_cast<unsigned char>(c)));
++            if (entry.is_regular_file(error) && (extension == ".z64" || extension == ".n64" || extension == ".v64")) {
++                rom_path = entry.path();
++                break;
++            }
++        }
++        callback(!rom_path.empty(), rom_path);
++#elif defined(__APPLE__)
+         file::apple::dispatch_on_ui_thread([callback]() {
+             perform_file_dialog_operation(callback);
+         });
+@@ -139,7 +166,11 @@ namespace recompui {
+     }
+ 
+     void file::open_file_dialog_multiple(std::function<void(bool success, const std::list<std::filesystem::path>& paths)> callback) {
+-#ifdef __APPLE__
++#if defined(__SWITCH__)
++        // Mods are discovered directly from the SD-card mods directory. There
++        // is no native multi-file picker on Horizon.
++        callback(false, {});
++#elif defined(__APPLE__)
+         file::apple::dispatch_on_ui_thread([callback]() {
+             perform_file_dialog_operation_multiple(callback);
+         });

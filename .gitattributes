@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# Patches must reach the dependencies byte for byte.
+*.patch -text
+
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary
+*.ico binary
+*.ttf binary
+*.svg text eol=lf

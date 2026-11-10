@@ -1,0 +1,679 @@
+diff --git a/librecomp/include/librecomp/rsp_vu_impl.hpp b/librecomp/include/librecomp/rsp_vu_impl.hpp
+index dbf46b2..3f0e0ff 100644
+--- a/librecomp/include/librecomp/rsp_vu_impl.hpp
++++ b/librecomp/include/librecomp/rsp_vu_impl.hpp
+@@ -231,6 +231,17 @@ auto RSP::LPV(r128& vt, cr32& rs, s8 imm) -> void {
+ template<u8 e>
+ auto RSP::LQV(r128& vt, cr32& rs, s8 imm) -> void {
+     auto address = rs + imm * 16;
++#if defined(RECOMP_SWITCH_RSP_VECTOR_MEMORY) && ARCHITECTURE_SUPPORTS_SSE4_1
++    // DMEM swaps bytes within words; vector storage reverses element order.
++    // For an aligned complete vector this is just reversal of four words.
++    // The final aligned DMEM block ends at 0x1000 and cannot cross the wrap.
++    if constexpr (e == 0) {
++        if ((address & 15) == 0) {
++            vt.v128 = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(dmem + (address & 0xfff))), _MM_SHUFFLE(0, 1, 2, 3));
++            return;
++        }
++    }
++#endif
+     auto start = e;
+     auto end = std::min((u32)(16 + e - (address & 15)), (u32)16);
+     for (u32 offset = start; offset < end; offset++) {
+@@ -421,6 +432,17 @@ auto RSP::SPV(cr128& vt, cr32& rs, s8 imm) -> void {
+ template<u8 e>
+ auto RSP::SQV(cr128& vt, cr32& rs, s8 imm) -> void {
+     auto address = rs + imm * 16;
++#if defined(RECOMP_SWITCH_RSP_VECTOR_MEMORY) && ARCHITECTURE_SUPPORTS_SSE4_1
++    // DMEM swaps bytes within words; vector storage reverses element order.
++    // For an aligned complete vector this is just reversal of four words.
++    // The final aligned DMEM block ends at 0x1000 and cannot cross the wrap.
++    if constexpr (e == 0) {
++        if ((address & 15) == 0) {
++            _mm_storeu_si128(reinterpret_cast<__m128i*>(dmem + (address & 0xfff)), _mm_shuffle_epi32(vt.v128, _MM_SHUFFLE(0, 1, 2, 3)));
++            return;
++        }
++    }
++#endif
+     auto start = e;
+     auto end = start + (16 - (address & 15));
+     for (u32 offset = start; offset < end; offset++) {
+diff --git a/librecomp/src/config.cpp b/librecomp/src/config.cpp
+index 6bc03fd..6d7208e 100644
+--- a/librecomp/src/config.cpp
++++ b/librecomp/src/config.cpp
+@@ -41,6 +41,8 @@ static bool save_json_with_backups(const std::filesystem::path& path, const nloh
+         }
+ 
+         output_file << std::setw(4) << json_data;
++        output_file.close();
++        if (!output_file.good()) return false;
+     }
+     return recomp::finalize_output_file_with_backup(path);
+ }
+diff --git a/librecomp/src/files.cpp b/librecomp/src/files.cpp
+index af6f18d..f43fadd 100644
+--- a/librecomp/src/files.cpp
++++ b/librecomp/src/files.cpp
+@@ -36,6 +36,27 @@ bool recomp::finalize_output_file_with_backup(const std::filesystem::path& filep
+     temp_path += temp_suffix;
+ 
+     std::error_code ec;
++#if defined(__SWITCH__)
++    // Horizon does not consistently support replacement through the host
++    // filesystem copy/rename overwrite paths. Keep either the current file
++    // or its backup valid throughout an explicit destination replacement.
++    const bool has_current = std::filesystem::exists(filepath, ec);
++    if (ec) return false;
++    if (has_current) {
++        std::filesystem::remove(backup_path, ec);
++        if (ec) return false;
++        std::filesystem::rename(filepath, backup_path, ec);
++        if (ec) return false;
++    }
++    std::filesystem::rename(temp_path, filepath, ec);
++    if (ec) {
++        std::error_code restore_ec;
++        if (!std::filesystem::exists(filepath, restore_ec) && !restore_ec && std::filesystem::exists(backup_path, restore_ec) && !restore_ec)
++            std::filesystem::rename(backup_path, filepath, restore_ec);
++        return false;
++    }
++    return true;
++#else
+     if (std::filesystem::exists(filepath, ec)) {
+         std::filesystem::copy_file(filepath, backup_path, std::filesystem::copy_options::overwrite_existing, ec);
+         if (ec) {
+@@ -48,4 +69,5 @@ bool recomp::finalize_output_file_with_backup(const std::filesystem::path& filep
+     }
+     std::filesystem::remove(temp_path, ec);
+     return true;
++#endif
+ }
+diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
+index 0f7de83..3a0f555 100644
+--- a/librecomp/src/mods.cpp
++++ b/librecomp/src/mods.cpp
+@@ -90,7 +90,26 @@ struct overloaded : Ts... { using Ts::operator()...; };
+ template<class... Ts>
+ overloaded(Ts...) -> overloaded<Ts...>;
+ 
+-#if defined(_WIN32)
++#if defined(__SWITCH__)
++class recomp::mods::DynamicLibrary {
++public:
++    static constexpr std::string_view PlatformExtension = ".nso";
++    DynamicLibrary() = default;
++    explicit DynamicLibrary(const std::filesystem::path&) {}
++    void unload() {}
++    bool good() const { return false; }
++    template <typename T> bool get_dll_symbol(T& out, const char*) const {
++        out = nullptr;
++        return false;
++    }
++    uint32_t get_api_version() { return static_cast<uint32_t>(-1); }
++};
++
++// Live function patching is disabled during initial Horizon bring-up. Embedded
++// and data-only mods remain available without executable-memory transitions.
++void unprotect(void*, uint64_t* old_flags) { *old_flags = 0; }
++void protect(void*, uint64_t) {}
++#elif defined(_WIN32)
+ #   define WIN32_LEAN_AND_MEAN
+ #   include "Windows.h"
+ 
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 1200f77..1214895 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -25,10 +25,17 @@
+ #include "librecomp/mods.hpp"
+ #include "recompiler/live_recompiler.h"
+ 
+-#ifdef _WIN32
++#if defined(__SWITCH__)
++void switch_log_checkpoint(const char*, bool);
++#define LIBRECOMP_SWITCH_CHECKPOINT(message) ::switch_log_checkpoint(message, false)
++#else
++#define LIBRECOMP_SWITCH_CHECKPOINT(message) ((void)0)
++#endif
++
++#if defined(_WIN32)
+ #    define WIN32_LEAN_AND_MEAN
+ #    include <Windows.h>
+-#else
++#elif !defined(__SWITCH__)
+ #    include <sys/mman.h>
+ #endif
+ 
+@@ -840,7 +847,12 @@ void recomp::start(
+     // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
+     uint8_t* rdram;
+     bool alloc_failed;
+-#ifdef _WIN32
++#if defined(__SWITCH__)
++    // Horizon has no POSIX anonymous mmap. The static recompilation only needs
++    // the real RDRAM range; the desktop guard region is a debugging aid.
++    rdram = static_cast<uint8_t*>(std::calloc(1, mem_size));
++    alloc_failed = (rdram == nullptr);
++#elif defined(_WIN32)
+     rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+     DWORD old_protect = 0;
+     alloc_failed = (rdram == nullptr);
+@@ -873,35 +885,47 @@ void recomp::start(
+     recomp::mods::register_hook_exports();
+ 
+     std::thread game_thread{[](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
++        LIBRECOMP_SWITCH_CHECKPOINT("runtime: game start thread entered");
+         debug_printf("[Recomp] Starting\n");
+ 
+         ultramodern::set_native_thread_name("Game Start Thread");
+ 
++        LIBRECOMP_SWITCH_CHECKPOINT("runtime: game preinit call entered");
+         ultramodern::preinit(rdram, window_handle);
++        LIBRECOMP_SWITCH_CHECKPOINT("runtime: game preinit call returned");
+ 
+         recomp_context context{};
+ 
+         // Loop until the game starts.
++        LIBRECOMP_SWITCH_CHECKPOINT("runtime: waiting for game start");
+         while (!wait_for_game_started(rdram, &context)) {}
+     }, window_handle, rdram};
+ 
++    bool first_main_loop = true;
+     while (!exited) {
++        if (first_main_loop) LIBRECOMP_SWITCH_CHECKPOINT("runtime: first main-loop sleep entered");
+         ultramodern::sleep_milliseconds(1);
++        if (first_main_loop) LIBRECOMP_SWITCH_CHECKPOINT("runtime: first main-loop sleep returned");
+         if (gfx_callbacks.update_gfx != nullptr) {
+             gfx_callbacks.update_gfx(gfx_data);
+         }
++        first_main_loop = false;
+     }
+ 
+     graphics_shutdown_ready.signal();
+ 
+     game_thread.join();
++    ultramodern::join_timer_thread();
+     ultramodern::join_event_threads();
+     ultramodern::join_thread_cleaner_thread();
+     ultramodern::join_saving_thread();
+     
+     // Free rdram.
+     bool free_failed;
+-#ifdef _WIN32
++#if defined(__SWITCH__)
++    std::free(rdram);
++    free_failed = false;
++#elif defined(_WIN32)
+     // VirtualFree returns zero on failure.
+     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
+ #else
+diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
+index 41ba094..30af8fd 100644
+--- a/thirdparty/concurrentqueue/lightweightsemaphore.h
++++ b/thirdparty/concurrentqueue/lightweightsemaphore.h
+@@ -24,7 +24,7 @@ extern "C" {
+ }
+ #elif defined(__MACH__)
+ #include <mach/mach.h>
+-#elif defined(__unix__)
++#elif defined(__unix__) || defined(__SWITCH__)
+ #include <semaphore.h>
+ 
+ #if defined(__GLIBC_PREREQ) && defined(_GNU_SOURCE)
+@@ -165,7 +165,7 @@ public:
+ 		}
+ 	}
+ };
+-#elif defined(__unix__)
++#elif defined(__unix__) || defined(__SWITCH__)
+ //---------------------------------------------------------
+ // Semaphore (POSIX, Linux)
+ //---------------------------------------------------------
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index d60c4ec..2ae644f 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -54,7 +54,7 @@ namespace ultramodern {
+             auto operator<=>(const WindowHandle&) const = default;
+         };
+ // TODO add a native window handle option here (Display/Window for x11 and ANativeWindow for Android) as a compile-time option.
+-#elif defined(__linux__) || defined(__ANDROID__)
++#elif defined(__linux__) || defined(__ANDROID__) || defined(__SWITCH__)
+         using WindowHandle = SDL_Window*;
+ #elif defined(__APPLE__)
+         struct WindowHandle {
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 3b28af3..c6fc9e9 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -124,6 +124,7 @@ struct gfx_callbacks_t {
+ bool is_game_started();
+ void quit();
+ void join_event_threads();
++void join_timer_thread();
+ void join_thread_cleaner_thread();
+ void join_saving_thread();
+ 
+diff --git a/ultramodern/src/error_handling.cpp b/ultramodern/src/error_handling.cpp
+index 8ca779e..f415d72 100644
+--- a/ultramodern/src/error_handling.cpp
++++ b/ultramodern/src/error_handling.cpp
+@@ -21,7 +21,7 @@ void ultramodern::error_handling::message_box(const char* msg) {
+ void ultramodern::error_handling::quick_exit(const char* filename, int line, const char *func, int exit_status) {
+     fprintf(stderr, "Exiting with exit status '%i'. Function %s, at file %s:%i\n", exit_status, func, filename, line);
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__SWITCH__)
+     std::_Exit(exit_status);
+ #else
+     std::quick_exit(exit_status);
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 090cc42..8f5ae9b 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -8,6 +8,7 @@
+ #include <mutex>
+ #include <queue>
+ #include <cstring>
++#include <cstdlib>
+ 
+ #include "blockingconcurrentqueue.h"
+ 
+@@ -18,6 +19,19 @@
+ #include "ultramodern/rsp.hpp"
+ #include "ultramodern/renderer_context.hpp"
+ 
++#if defined(__SWITCH__)
++void switch_log_checkpoint(const char*, bool);
++extern "C" void switch_perf_record(const char*, uint64_t, uint64_t) __attribute__((weak));
++static bool switch_profile_active() {
++    static const bool active = [] { const char* value = std::getenv("RECOMP_SWITCH_PROFILE");
++        return !value || *value != '0'; }();
++    return active && switch_perf_record;
++}
++#define ULTRAMODERN_SWITCH_CHECKPOINT(message) ::switch_log_checkpoint(message, false)
++#else
++#define ULTRAMODERN_SWITCH_CHECKPOINT(message) ((void)0)
++#endif
++
+ static ultramodern::events::callbacks_t events_callbacks{};
+ 
+ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t& callbacks) {
+@@ -180,6 +194,7 @@ extern moodycamel::LightweightSemaphore graphics_shutdown_ready;
+ void set_dummy_vi(bool odd);
+ 
+ void vi_thread_func() {
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: VI thread entered");
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows
+     // the game to generate new audio and gfx lists.
+@@ -188,6 +203,10 @@ void vi_thread_func() {
+ 
+     int remaining_retraces = 1;
+ 
++#if defined(__SWITCH__)
++    auto previous_vi = std::chrono::steady_clock::now();
++#endif
++    bool first_vi = true;
+     while (!exited) {
+         // Determine the next VI time (more accurate than adding 16ms each VI interrupt)
+         auto next = ultramodern::get_start() + (total_vis * 1000000us) / (60 * ultramodern::get_speed_multiplier());
+@@ -204,7 +223,17 @@ void vi_thread_func() {
+             // printf("Skipping the next VI wait\n");
+             next = std::chrono::high_resolution_clock::now();
+         }
++        if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first VI sleep entered");
+         ultramodern::sleep_until(next);
++        if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first VI sleep returned");
++#if defined(__SWITCH__)
++        if (switch_profile_active()) {
++            const auto completed = std::chrono::steady_clock::now();
++            if (!first_vi) switch_perf_record("vi_interval", std::chrono::duration_cast<std::chrono::nanoseconds>(
++                completed - previous_vi).count(), total_vis);
++            previous_vi = completed;
++        }
++#endif
+         auto time_now = ultramodern::time_since_start();
+         // Calculate how many VIs have passed
+         uint64_t new_total_vis = (time_now * (60 * ultramodern::get_speed_multiplier()) / 1000ms) + 1;
+@@ -215,19 +244,24 @@ void vi_thread_func() {
+ 
+         // If the game hasn't started yet, set a dummy VI mode and origin.
+         if (!ultramodern::is_game_started()) {
++            if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first dummy VI setup entered");
+             static bool odd = false;
+             set_dummy_vi(odd);
+             odd = !odd;
+ 
+             events_context.action_queue.enqueue(DummyWorkloadAction{events_context.vi.get_next_state()->framebuffer});
++            if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first dummy workload enqueued");
+         }
+ 
+         // Queue a screen update for the graphics thread with the current VI register state.
+         // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
+         events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++        if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first screen update enqueued");
+ 
+         // Update VI registers and swap VI modes.
++        if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first VI register update entered");
+         events_context.vi.update_vi();
++        if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first VI register update returned");
+ 
+         // If the game has started, handle sending VI and AI events.
+         if (ultramodern::is_game_started()) {
+@@ -250,8 +284,11 @@ void vi_thread_func() {
+         }
+ 
+         if (events_callbacks.vi_callback != nullptr) {
++            if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first VI callback entered");
+             events_callbacks.vi_callback();
++            if (first_vi) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first VI callback returned");
+         }
++        first_vi = false;
+     }
+ }
+ 
+@@ -268,11 +305,13 @@ void dp_complete() {
+ }
+ 
+ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: SP task thread entered");
+     ultramodern::set_native_thread_name("SP Task Thread");
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
+ 
+     // Notify the caller thread that this thread is ready.
+     thread_ready->signal();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: SP task thread ready signaled");
+ 
+     while (true) {
+         // Wait until an RSP task has been sent
+@@ -283,11 +322,19 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+             return;
+         }
+ 
++#if defined(__SWITCH__)
++        const bool profile_task = switch_profile_active();
++        const auto task_start = profile_task ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++#endif
+         if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
+             fprintf(stderr, "Failed to execute task type: %" PRIu32 "\n", task->t.type);
+             ULTRAMODERN_QUICK_EXIT();
+         }
+ 
++#if defined(__SWITCH__)
++        if (profile_task) switch_perf_record(task->t.type == M_AUDTASK ? "audio_rsp" : "other_rsp",
++            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - task_start).count(), 0);
++#endif
+         // Tell the game that the RSP has completed
+         sp_complete();
+     }
+@@ -326,6 +373,7 @@ std::atomic<ultramodern::renderer::SetupResult> renderer_setup_result = ultramod
+ std::atomic<ultramodern::renderer::GraphicsApi> renderer_chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+ 
+ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready, ultramodern::renderer::WindowHandle window_handle) {
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx thread entered");
+     bool enabled_instant_present = false;
+     using namespace std::chrono_literals;
+ 
+@@ -335,28 +383,36 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+     auto old_config = ultramodern::renderer::get_graphics_config();
+ 
+     auto renderer_context = ultramodern::renderer::create_render_context(rdram, window_handle, ultramodern::renderer::get_graphics_config().developer_mode);
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx renderer context returned");
+ 
+     renderer_chosen_api.store(renderer_context->get_chosen_api());
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx chosen API stored");
+     if (!renderer_context->valid()) {
+         renderer_setup_result.store(renderer_context->get_setup_result());
+         // Notify the caller thread that this thread is ready.
+         thread_ready->signal();
+         return;
+     }
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx renderer valid");
+ 
+     if (events_callbacks.gfx_init_callback != nullptr) {
+         events_callbacks.gfx_init_callback();
+     }
+ 
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: RSP init entered");
+     ultramodern::rsp::init();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: RSP init returned");
+ 
+     // Notify the caller thread that this thread is ready.
+     thread_ready->signal();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx thread ready signaled");
+ 
++    bool first_action = true;
+     while (!exited) {
+         // Try to pull an action from the queue
+         Action action;
+         if (events_context.action_queue.wait_dequeue_timed(action, 1ms)) {
++            if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first gfx action dequeued");
+             // Determine the action type and act on it
+             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
+                 // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
+@@ -373,6 +429,10 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 renderer_context->send_dl(&task_action->task);
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
++#if defined(__SWITCH__)
++                if (switch_profile_active()) switch_perf_record("display_list",
++                    std::chrono::duration_cast<std::chrono::nanoseconds>(renderer_end - renderer_start).count(), displaylist);
++#endif
+                 dp_complete();
+                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+                 ultramodern::extensions::on_displaylist_parsed(displaylist);
+@@ -380,10 +440,14 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 // printf("Renderer ProcessDList time: %d us\n", static_cast<u32>(std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count()));
+             }
+             else if (const auto* screen_update_action = std::get_if<ScreenUpdateAction>(&action)) {
++                if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first gfx action is screen update");
+                 events_context.vi.update_screen_regs = screen_update_action->regs;
+                 renderer_context->update_screen();
++                if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first renderer update_screen returned");
+                 display_refresh_rate = renderer_context->get_display_framerate();
++                if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first display framerate read");
+                 resolution_scale = renderer_context->get_resolution_scale();
++                if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first resolution scale read");
+             }
+             else if (const auto* config_action = std::get_if<UpdateConfigAction>(&action)) {
+                 (void)config_action;
+@@ -393,8 +457,11 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 }
+             }
+             else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
++                if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first gfx action is dummy workload");
+                 renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
++                if (first_action) ULTRAMODERN_SWITCH_CHECKPOINT("runtime: first dummy workload returned");
+             }
++            first_action = false;
+         }
+     }
+ 
+@@ -575,16 +642,21 @@ void ultramodern::send_si_message() {
+ }
+ 
+ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: init_events entered");
+     moodycamel::LightweightSemaphore gfx_thread_ready;
+     moodycamel::LightweightSemaphore task_thread_ready;
+     events_context.rdram = rdram;
+     events_context.sp.gfx_thread = std::thread{ gfx_thread_func, rdram, &gfx_thread_ready, window_handle };
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx thread spawned");
+     events_context.sp.task_thread = std::thread{ task_thread_func, rdram, &task_thread_ready };
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: SP task thread spawned");
+ 
+     // Wait for the two sp threads to be ready before continuing to prevent the game from
+     // running before we're able to handle RSP tasks.
+     gfx_thread_ready.wait();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: gfx thread ready observed");
+     task_thread_ready.wait();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: SP task thread ready observed");
+ 
+     ultramodern::renderer::SetupResult setup_result = renderer_setup_result.load();
+     if (setup_result != ultramodern::renderer::SetupResult::Success) {
+@@ -615,6 +687,7 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+     }
+ 
+     events_context.vi.thread = std::thread{ vi_thread_func };
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: VI thread spawned");
+ }
+ 
+ void ultramodern::join_event_threads() {
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 812c556..57066e9 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -144,6 +144,13 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+ }
+ 
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
++#elif defined(__SWITCH__)
++// Horizon does not expose the desktop thread naming/priority APIs used above.
++// libnx-backed std::threads still work; keep the hints as safe no-ops until the
++// scheduler policy is profiled on hardware.
++void ultramodern::set_native_thread_name(const std::string&) {}
++
++void ultramodern::set_native_thread_priority(ThreadPriority) {}
+ #endif
+ 
+ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
+index 276301b..bb08604 100644
+--- a/ultramodern/src/timer.cpp
++++ b/ultramodern/src/timer.cpp
+@@ -6,6 +6,13 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+ 
++#if defined(__SWITCH__)
++void switch_log_checkpoint(const char*, bool);
++#define ULTRAMODERN_TIMER_CHECKPOINT(message) ::switch_log_checkpoint(message, false)
++#else
++#define ULTRAMODERN_TIMER_CHECKPOINT(message) ((void)0)
++#endif
++
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN
+ #include "Windows.h"
+@@ -37,7 +44,10 @@ struct RemoveTimerAction {
+     PTR(OSTimer) timer;
+ };
+ 
+-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
++struct StopTimerThreadAction {
++};
++
++using Action = std::variant<AddTimerAction, RemoveTimerAction, StopTimerThreadAction>;
+ 
+ struct {
+     std::thread thread;
+@@ -67,6 +77,7 @@ uint64_t time_now() {
+ }
+ 
+ void timer_thread(RDRAM_ARG1) {
++    ULTRAMODERN_TIMER_CHECKPOINT("runtime: timer thread entered");
+     ultramodern::set_native_thread_name("Timer Thread");
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::VeryHigh);
+ 
+@@ -94,20 +105,28 @@ void timer_thread(RDRAM_ARG1) {
+             active_timers.insert(add_action->timer);
+         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
+             active_timers.erase(remove_action->timer);
++        } else if (std::get_if<StopTimerThreadAction>(&action) != nullptr) {
++            return true;
+         }
++        return false;
+     };
+ 
++    ULTRAMODERN_TIMER_CHECKPOINT("runtime: timer thread waiting");
+     while (true) {
+         // Empty the action queue
+         Action cur_action;
+         while (timer_context.action_queue.try_dequeue(cur_action)) {
+-            process_timer_action(cur_action);
++            if (process_timer_action(cur_action)) {
++                return;
++            }
+         }
+ 
+         // If there's no timer to act on, wait for one to come in from the action queue
+         while (active_timers.empty()) {
+             timer_context.action_queue.wait_dequeue(cur_action);
+-            process_timer_action(cur_action);
++            if (process_timer_action(cur_action)) {
++                return;
++            }
+         }
+ 
+         // Get the timer that's closest to running out
+@@ -126,7 +145,9 @@ void timer_thread(RDRAM_ARG1) {
+             // Add the current timer back to the queue (done first in case the action is to remove this timer)
+             active_timers.insert(cur_timer_);
+             // Process the new action
+-            process_timer_action(cur_action);
++            if (process_timer_action(cur_action)) {
++                return;
++            }
+         }
+         else {
+             // Waiting for the timer completed, so send the timer's message to its message queue
+@@ -141,8 +162,20 @@ void timer_thread(RDRAM_ARG1) {
+ }
+ 
+ void ultramodern::init_timers(RDRAM_ARG1) {
++    ULTRAMODERN_TIMER_CHECKPOINT("runtime: init_timers entered");
+     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
+-    timer_context.thread.detach();
++    ULTRAMODERN_TIMER_CHECKPOINT("runtime: timer thread spawned");
++    // Do not detach this thread. Nintendo Switch's pthread_detach returns
++    // ENOTSUP, which std::thread translates into an uncaught system_error.
++    // Keeping it joinable also gives every platform a deterministic shutdown.
++    ULTRAMODERN_TIMER_CHECKPOINT("runtime: timer thread kept joinable");
++}
++
++void ultramodern::join_timer_thread() {
++    if (timer_context.thread.joinable()) {
++        timer_context.action_queue.enqueue(StopTimerThreadAction{});
++        timer_context.thread.join();
++    }
+ }
+ 
+ uint32_t ultramodern::get_speed_multiplier() {
+diff --git a/ultramodern/src/ultrainit.cpp b/ultramodern/src/ultrainit.cpp
+index ca1556c..97c56f0 100644
+--- a/ultramodern/src/ultrainit.cpp
++++ b/ultramodern/src/ultrainit.cpp
+@@ -1,6 +1,13 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+ 
++#if defined(__SWITCH__)
++void switch_log_checkpoint(const char*, bool);
++#define ULTRAMODERN_SWITCH_CHECKPOINT(message) ::switch_log_checkpoint(message, false)
++#else
++#define ULTRAMODERN_SWITCH_CHECKPOINT(message) ((void)0)
++#endif
++
+ void ultramodern::set_callbacks(
+     const rsp::callbacks_t& rsp_callbacks,
+     const renderer::callbacks_t& renderer_callbacks,
+@@ -22,11 +29,17 @@ void ultramodern::set_callbacks(
+ }
+ 
+ void ultramodern::preinit(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: preinit entered");
+     ultramodern::set_main_thread();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: main thread registered");
+     ultramodern::init_events(PASS_RDRAM window_handle);
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: init_events returned");
+     ultramodern::init_timers(PASS_RDRAM1);
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: timers initialized");
+     ultramodern::init_audio();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: runtime audio initialized");
+     ultramodern::init_thread_cleanup();
++    ULTRAMODERN_SWITCH_CHECKPOINT("runtime: thread cleanup initialized");
+ }
+ 
+ extern "C" void osInitialize() {

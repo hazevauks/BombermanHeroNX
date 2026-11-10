@@ -1,0 +1,14 @@
+diff --git a/CMake/RuntimeUtilities.cmake b/CMake/RuntimeUtilities.cmake
+index 9bc069c3..440fe838 100644
+--- a/CMake/RuntimeUtilities.cmake
++++ b/CMake/RuntimeUtilities.cmake
+@@ -24,7 +24,8 @@ endfunction()
+ ]]
+ function(setup_runtime_dependency_set_arg)
+ 	set(RMLUI_RUNTIME_DEPENDENCY_SET_ARG "" PARENT_SCOPE)
+-	if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.21")
++	# CMake built for MSYS (devkitPro on Windows) rejects RUNTIME_DEPENDENCY_SET.
++	if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.21" AND NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "MSYS")
+ 		set(RMLUI_RUNTIME_DEPENDENCY_SET_ARG RUNTIME_DEPENDENCY_SET rmlui_runtime_dependencies PARENT_SCOPE)
+ 	endif()
+ endfunction()
